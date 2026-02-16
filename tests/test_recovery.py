@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import time
-from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -11,61 +10,10 @@ from bleak_retry_connector.recovery import (
     PROFILE_BATTERY,
     PROFILE_ON_DEMAND,
     PROFILE_SENSOR,
-    TOOLS,
     EscalationAction,
     EscalationConfig,
     EscalationPolicy,
-    ToolCapabilities,
-    reset_adapter,
 )
-
-# ---------------------------------------------------------------------------
-# ToolCapabilities tests
-# ---------------------------------------------------------------------------
-
-
-class TestToolCapabilities:
-    """Tests for ToolCapabilities detection and properties."""
-
-    def test_detect_returns_instance(self):
-        """detect() should return a ToolCapabilities instance."""
-        caps = ToolCapabilities.detect()
-        assert isinstance(caps, ToolCapabilities)
-
-    def test_has_shell_tools_requires_both(self):
-        """has_shell_tools needs both bluetoothctl and hcitool."""
-        caps = ToolCapabilities(bluetoothctl="/usr/bin/bluetoothctl", hcitool=None)
-        assert caps.has_shell_tools is False
-
-        caps = ToolCapabilities(
-            bluetoothctl="/usr/bin/bluetoothctl", hcitool="/usr/bin/hcitool"
-        )
-        assert caps.has_shell_tools is True
-
-    def test_can_reset_adapter(self):
-        """can_reset_adapter needs hciconfig."""
-        caps = ToolCapabilities(hciconfig=None)
-        assert caps.can_reset_adapter is False
-
-        caps = ToolCapabilities(hciconfig="/usr/bin/hciconfig")
-        assert caps.can_reset_adapter is True
-
-    def test_can_diagnose(self):
-        """can_diagnose is the same as has_shell_tools."""
-        caps = ToolCapabilities(
-            bluetoothctl="/usr/bin/bluetoothctl", hcitool="/usr/bin/hcitool"
-        )
-        assert caps.can_diagnose is True
-
-    def test_frozen_dataclass(self):
-        """ToolCapabilities should be immutable."""
-        caps = ToolCapabilities(bluetoothctl="/usr/bin/bluetoothctl")
-        with pytest.raises(AttributeError):
-            caps.bluetoothctl = "/other/path"  # type: ignore[misc]
-
-    def test_module_level_tools_singleton(self):
-        """TOOLS module-level singleton should be a ToolCapabilities instance."""
-        assert isinstance(TOOLS, ToolCapabilities)
 
 
 # ---------------------------------------------------------------------------
@@ -285,143 +233,6 @@ class TestEscalationPolicy:
 
 
 # ---------------------------------------------------------------------------
-# reset_adapter tests
-# ---------------------------------------------------------------------------
-
-
-class TestResetAdapter:
-    """Tests for the reset_adapter utility function."""
-
-    @pytest.mark.asyncio
-    async def test_returns_false_when_not_linux(self):
-        """reset_adapter should return False on non-Linux."""
-        with patch("bleak_retry_connector.recovery.IS_LINUX", False):
-            result = await reset_adapter("hci0")
-            assert result is False
-
-    @pytest.mark.asyncio
-    async def test_returns_false_when_no_hciconfig(self):
-        """reset_adapter should return False when hciconfig is not found."""
-        tools_no_hciconfig = ToolCapabilities(hciconfig=None)
-        with (
-            patch("bleak_retry_connector.recovery.IS_LINUX", True),
-            patch("bleak_retry_connector.recovery.TOOLS", tools_no_hciconfig),
-        ):
-            result = await reset_adapter("hci0")
-            assert result is False
-
-    @pytest.mark.asyncio
-    async def test_calls_hciconfig_down_up(self):
-        """reset_adapter should call hciconfig down then up."""
-        mock_tools = ToolCapabilities(
-            hciconfig="/usr/bin/hciconfig",
-            bluetoothctl="/usr/bin/bluetoothctl",
-        )
-        mock_run = MagicMock(return_value=MagicMock(returncode=0))
-
-        async def fast_sleep(_):
-            pass
-
-        with (
-            patch("bleak_retry_connector.recovery.IS_LINUX", True),
-            patch("bleak_retry_connector.recovery.TOOLS", mock_tools),
-            patch("bleak_retry_connector.recovery.subprocess.run", mock_run),
-            patch("bleak_retry_connector.recovery.asyncio.sleep", fast_sleep),
-        ):
-            result = await reset_adapter("hci0", restart_bluetoothd=False)
-
-        assert result is True
-        calls = mock_run.call_args_list
-        assert len(calls) == 2
-        assert calls[0][0][0] == ["/usr/bin/hciconfig", "hci0", "down"]
-        assert calls[1][0][0] == ["/usr/bin/hciconfig", "hci0", "up"]
-
-    @pytest.mark.asyncio
-    async def test_restarts_bluetoothd_if_dead(self):
-        """reset_adapter should restart bluetoothd if it died."""
-        mock_tools = ToolCapabilities(
-            hciconfig="/usr/bin/hciconfig",
-            bluetoothctl="/usr/bin/bluetoothctl",
-        )
-
-        call_log: list[list[str]] = []
-
-        def mock_run(cmd, **kwargs):
-            call_log.append(cmd)
-            result = MagicMock()
-            if cmd[0] == "pidof":
-                result.returncode = 1  # bluetoothd not running
-            else:
-                result.returncode = 0
-            return result
-
-        async def fast_sleep(_):
-            pass
-
-        with (
-            patch("bleak_retry_connector.recovery.IS_LINUX", True),
-            patch("bleak_retry_connector.recovery.TOOLS", mock_tools),
-            patch("bleak_retry_connector.recovery.subprocess.run", mock_run),
-            patch("bleak_retry_connector.recovery.asyncio.sleep", fast_sleep),
-        ):
-            result = await reset_adapter("hci0", restart_bluetoothd=True)
-
-        assert result is True
-        pidof_calls = [c for c in call_log if c[0] == "pidof"]
-        assert len(pidof_calls) == 1
-        bluetooth_calls = [c for c in call_log if "/etc/init.d/bluetooth" in str(c)]
-        assert len(bluetooth_calls) == 1
-
-    @pytest.mark.asyncio
-    async def test_returns_false_on_down_failure(self):
-        """reset_adapter should return False if hciconfig down raises."""
-        mock_tools = ToolCapabilities(hciconfig="/usr/bin/hciconfig")
-
-        with (
-            patch("bleak_retry_connector.recovery.IS_LINUX", True),
-            patch("bleak_retry_connector.recovery.TOOLS", mock_tools),
-            patch(
-                "bleak_retry_connector.recovery.subprocess.run",
-                side_effect=OSError("command failed"),
-            ),
-        ):
-            result = await reset_adapter("hci0")
-
-        assert result is False
-
-    @pytest.mark.asyncio
-    async def test_returns_false_on_up_nonzero(self):
-        """reset_adapter should return False if hciconfig up returns non-zero."""
-        mock_tools = ToolCapabilities(hciconfig="/usr/bin/hciconfig")
-
-        call_count = 0
-
-        def mock_run(cmd, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            result = MagicMock()
-            if call_count == 1:
-                result.returncode = 0  # down succeeds
-            else:
-                result.returncode = 1  # up fails
-                result.stderr = b"some error"
-            return result
-
-        async def fast_sleep(_):
-            pass
-
-        with (
-            patch("bleak_retry_connector.recovery.IS_LINUX", True),
-            patch("bleak_retry_connector.recovery.TOOLS", mock_tools),
-            patch("bleak_retry_connector.recovery.subprocess.run", mock_run),
-            patch("bleak_retry_connector.recovery.asyncio.sleep", fast_sleep),
-        ):
-            result = await reset_adapter("hci0", restart_bluetoothd=False)
-
-        assert result is False
-
-
-# ---------------------------------------------------------------------------
 # Integration: importability from top-level
 # ---------------------------------------------------------------------------
 
@@ -432,10 +243,7 @@ def test_importable_from_top_level():
         PROFILE_BATTERY,
         PROFILE_ON_DEMAND,
         PROFILE_SENSOR,
-        TOOLS,
         EscalationAction,
         EscalationConfig,
         EscalationPolicy,
-        ToolCapabilities,
-        reset_adapter,
     )

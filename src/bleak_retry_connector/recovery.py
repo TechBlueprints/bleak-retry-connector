@@ -8,80 +8,25 @@ an action the caller has disabled.
 Escalation levels (least to most disruptive)::
 
     1. RETRY          — simple backoff retry
-    2. DIAGNOSE       — diagnose stuck state + targeted fix (future PR 1)
+    2. DIAGNOSE       — diagnose stuck state + targeted fix
     3. CLEAR_BLUEZ    — clear InProgress-dominant stale BlueZ state
     4. ROTATE_ADAPTER — switch to a different adapter
-    5. RESET_ADAPTER  — hciconfig down/up (disrupts ALL connections)
+    5. RESET_ADAPTER  — power-cycle adapter (disrupts ALL connections)
 
-Also provides:
-- :class:`ToolCapabilities` for detecting available BLE shell tools
-- :func:`reset_adapter` as a standalone last-resort utility
+For adapter reset, callers should use ``bluetooth-auto-recovery``
+(``bluetooth_auto_recovery.recover_adapter()``) which handles adapter
+recovery via the BlueZ management socket, kernel ioctl, USB device
+reset, and rfkill — rather than shelling out to ``hciconfig``.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
-import shutil
-import subprocess  # nosec
 import time
 from dataclasses import dataclass
 from enum import Enum
 
-from .const import IS_LINUX
-
 _LOGGER = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Tool capabilities — probed once at import
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class ToolCapabilities:
-    """Detected system tool availability — probed once at import time.
-
-    All diagnostic and recovery code should check this object instead of
-    calling ``shutil.which()`` ad-hoc.
-    """
-
-    bluetoothctl: str | None = None
-    hcitool: str | None = None
-    hciconfig: str | None = None
-    rfkill: str | None = None
-
-    @property
-    def has_shell_tools(self) -> bool:
-        """True if the core diagnostic tools are available."""
-        return self.bluetoothctl is not None and self.hcitool is not None
-
-    @property
-    def can_reset_adapter(self) -> bool:
-        """True if adapter reset is possible."""
-        return self.hciconfig is not None
-
-    @property
-    def can_diagnose(self) -> bool:
-        """True if precise stuck-state diagnosis is possible."""
-        return self.has_shell_tools
-
-    @classmethod
-    def detect(cls) -> ToolCapabilities:
-        """Probe the system for available BLE tools.
-
-        Called once at module import.  Results are cached for the
-        lifetime of the process.
-        """
-        return cls(
-            bluetoothctl=shutil.which("bluetoothctl"),
-            hcitool=shutil.which("hcitool"),
-            hciconfig=shutil.which("hciconfig"),
-            rfkill=shutil.which("rfkill"),
-        )
-
-
-TOOLS = ToolCapabilities.detect()
 
 
 # ---------------------------------------------------------------------------
@@ -265,105 +210,3 @@ class EscalationPolicy:
         """Check if enough time has passed since the last reset."""
         last = self._last_reset.get(adapter, 0.0)
         return (time.monotonic() - last) >= self._config.reset_cooldown
-
-
-# ---------------------------------------------------------------------------
-# Adapter reset utility
-# ---------------------------------------------------------------------------
-
-
-async def reset_adapter(
-    adapter: str,
-    restart_bluetoothd: bool = True,
-) -> bool:
-    """Reset a BLE adapter as a last resort.
-
-    This should only be called after all other recovery mechanisms have
-    failed.  It temporarily disrupts **ALL** BLE connections on the
-    adapter.
-
-    Sequence:
-
-    1. ``hciconfig <adapter> down``
-    2. sleep 1.0 s
-    3. ``hciconfig <adapter> up``
-    4. If *restart_bluetoothd* is ``True``, check whether ``bluetoothd``
-       survived the reset and restart it if not.
-
-    On Venus OS, ``bluetoothd`` can crash during adapter reset.  The
-    code checks ``pidof bluetoothd`` and restarts the daemon if it is
-    not running.
-
-    Returns ``True`` if the reset appeared successful (adapter is UP
-    and ``bluetoothd`` is running).
-    """
-    if not IS_LINUX:
-        return False
-    if not TOOLS.can_reset_adapter:
-        _LOGGER.warning(
-            "Cannot reset %s: hciconfig not found",
-            adapter,
-        )
-        return False
-
-    hciconfig = TOOLS.hciconfig
-    assert hciconfig is not None  # nosec — checked above
-
-    _LOGGER.warning("Resetting adapter %s (hciconfig down/up)", adapter)
-
-    try:
-        subprocess.run(  # nosec
-            [hciconfig, adapter, "down"],
-            capture_output=True,
-            timeout=5,
-        )
-    except Exception:
-        _LOGGER.exception("Failed to bring %s down", adapter)
-        return False
-
-    await asyncio.sleep(1.0)
-
-    try:
-        result = subprocess.run(  # nosec
-            [hciconfig, adapter, "up"],
-            capture_output=True,
-            timeout=5,
-        )
-        if result.returncode != 0:
-            _LOGGER.error(
-                "hciconfig %s up failed: %s",
-                adapter,
-                result.stderr.decode(errors="replace"),
-            )
-            return False
-    except Exception:
-        _LOGGER.exception("Failed to bring %s up", adapter)
-        return False
-
-    if restart_bluetoothd:
-        await asyncio.sleep(0.5)
-        try:
-            pidof = subprocess.run(  # nosec
-                ["pidof", "bluetoothd"],
-                capture_output=True,
-                timeout=3,
-            )
-            if pidof.returncode != 0:
-                _LOGGER.warning(
-                    "bluetoothd not running after %s reset, restarting",
-                    adapter,
-                )
-                subprocess.run(  # nosec
-                    ["/etc/init.d/bluetooth", "start"],
-                    capture_output=True,
-                    timeout=10,
-                )
-                await asyncio.sleep(3.0)
-        except Exception:
-            _LOGGER.debug(
-                "Failed to check/restart bluetoothd",
-                exc_info=True,
-            )
-
-    _LOGGER.info("Adapter %s reset complete", adapter)
-    return True

@@ -34,12 +34,9 @@ from .recovery import (  # noqa: F401
     PROFILE_BATTERY,
     PROFILE_ON_DEMAND,
     PROFILE_SENSOR,
-    TOOLS,
     EscalationAction,
     EscalationConfig,
     EscalationPolicy,
-    ToolCapabilities,
-    reset_adapter,
 )
 from .util import asyncio_timeout
 
@@ -89,15 +86,12 @@ __all__ = [
     "BLEAK_RETRY_EXCEPTIONS",
     "RSSI_SWITCH_THRESHOLD",
     "NO_RSSI_VALUE",
-    "ToolCapabilities",
-    "TOOLS",
     "EscalationAction",
     "EscalationConfig",
     "EscalationPolicy",
     "PROFILE_BATTERY",
     "PROFILE_SENSOR",
     "PROFILE_ON_DEMAND",
-    "reset_adapter",
 ]
 
 
