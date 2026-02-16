@@ -33,6 +33,17 @@ from .bluez import (  # noqa: F401
     wait_for_disconnect,
 )
 from .const import IS_LINUX, NO_RSSI_VALUE, RSSI_SWITCH_THRESHOLD, THREAD_SAFETY_TIMEOUT
+from .recovery import (  # noqa: F401
+    PROFILE_BATTERY,
+    PROFILE_ON_DEMAND,
+    PROFILE_SENSOR,
+    TOOLS,
+    EscalationAction,
+    EscalationConfig,
+    EscalationPolicy,
+    ToolCapabilities,
+    reset_adapter,
+)
 from .util import asyncio_timeout
 from .watchdog import ConnectionWatchdog  # noqa: F401
 
@@ -84,6 +95,15 @@ __all__ = [
     "RSSI_SWITCH_THRESHOLD",
     "NO_RSSI_VALUE",
     "THREAD_SAFETY_TIMEOUT",
+    "ToolCapabilities",
+    "TOOLS",
+    "EscalationAction",
+    "EscalationConfig",
+    "EscalationPolicy",
+    "PROFILE_BATTERY",
+    "PROFILE_SENSOR",
+    "PROFILE_ON_DEMAND",
+    "reset_adapter",
 ]
 
 
