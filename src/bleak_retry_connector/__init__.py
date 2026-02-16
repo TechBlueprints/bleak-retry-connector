@@ -5,8 +5,6 @@ __version__ = "4.5.0"
 
 import asyncio
 import logging
-import shutil
-import subprocess  # nosec
 import threading
 from collections.abc import Awaitable, Callable
 from typing import Any, ParamSpec, TypeVar
@@ -399,9 +397,40 @@ async def close_stale_connections(
 AnyBleakClient = TypeVar("AnyBleakClient", bound=BleakClient)
 
 
-def _find_bluetoothctl() -> str | None:
-    """Find the bluetoothctl binary, or None if not available."""
-    return shutil.which("bluetoothctl")
+async def _clear_device_via_dbus(address: str) -> None:
+    """Send RemoveDevice to BlueZ over a fresh D-Bus connection.
+
+    Designed to run inside ``asyncio.run()`` from a separate thread so
+    it works even when the main event loop is blocked.  Uses ``dbus-fast``
+    (already a project dependency on Linux) directly rather than shelling
+    out to ``bluetoothctl``.
+    """
+    from dbus_fast import BusType, Message  # type: ignore[import-untyped]
+    from dbus_fast.aio import MessageBus  # type: ignore[import-untyped]
+
+    bus = MessageBus(bus_type=BusType.SYSTEM)
+    await bus.connect()
+    try:
+        dev_part = f"dev_{address.upper().replace(':', '_')}"
+        for i in range(9):
+            adapter_path = f"/org/bluez/hci{i}"
+            device_path = f"{adapter_path}/{dev_part}"
+            try:
+                await bus.call(
+                    Message(
+                        destination="org.bluez",
+                        path=adapter_path,
+                        interface="org.bluez.Adapter1",
+                        member="RemoveDevice",
+                        signature="o",
+                        body=[device_path],
+                    )
+                )
+            except Exception:  # noqa: BLE001
+                # Device doesn't exist on this adapter -- expected
+                pass
+    finally:
+        bus.disconnect()
 
 
 async def establish_connection(
@@ -423,12 +452,13 @@ async def establish_connection(
     independently of the asyncio event loop.  If the entire
     ``establish_connection`` call takes longer than
     ``THREAD_SAFETY_TIMEOUT`` (45 s), the timer fires and clears stale
-    BlueZ state via ``bluetoothctl remove`` in a subprocess.  This
-    handles the case where a D-Bus call blocks the event loop so the
-    asyncio safety timeout never fires.
+    BlueZ state by sending ``RemoveDevice`` over a fresh D-Bus
+    connection (via ``dbus-fast``, already a project dependency).  This
+    handles the case where a synchronous D-Bus call blocks the event
+    loop so the asyncio safety timeout never fires.
 
-    The timer is opt-in because it spawns a thread and may call
-    ``subprocess.run``; existing callers are unaffected.
+    The timer is opt-in because it spawns a thread; existing callers
+    are unaffected.
     """
     timeouts = 0
     connect_errors = 0
@@ -480,49 +510,31 @@ async def establish_connection(
 
     # Thread-level safety timer: runs independently of the asyncio event
     # loop so it can fire even when a synchronous D-Bus call blocks the
-    # loop.  The callback uses subprocess.run (not the event loop) to
-    # clear stale BlueZ state.
+    # loop.  The callback opens a fresh D-Bus connection via dbus-fast
+    # (already a dependency on Linux) and sends RemoveDevice directly,
+    # avoiding subprocess calls entirely.
     timer: threading.Timer | None = None
     if safety_timer and IS_LINUX:
         device_address = device.address
-        bluetoothctl = _find_bluetoothctl()
-        loop = asyncio.get_running_loop()
 
         def _safety_timer_callback() -> None:
             """Fire from a daemon thread when the event loop appears stuck."""
             _LOGGER.warning(
                 "%s - %s: Safety timer fired after %s s"
-                " — clearing stale BlueZ state",
+                " — clearing stale BlueZ state via D-Bus",
                 name,
                 device_address,
                 THREAD_SAFETY_TIMEOUT,
             )
-            if bluetoothctl:
-                try:
-                    subprocess.run(  # nosec
-                        [bluetoothctl, "remove", device_address],
-                        capture_output=True,
-                        timeout=5,
-                    )
-                except Exception:
-                    _LOGGER.debug(
-                        "%s - %s: Safety timer bluetoothctl failed",
-                        name,
-                        device_address,
-                        exc_info=True,
-                    )
-            else:
-                # Fallback: schedule on the event loop.  May not execute
-                # if the loop is truly stuck, but will run once it unblocks.
-                try:
-                    asyncio.run_coroutine_threadsafe(clear_cache(device_address), loop)
-                except Exception:
-                    _LOGGER.debug(
-                        "%s - %s: Safety timer fallback clear_cache failed",
-                        name,
-                        device_address,
-                        exc_info=True,
-                    )
+            try:
+                asyncio.run(_clear_device_via_dbus(device_address))
+            except Exception:
+                _LOGGER.debug(
+                    "%s - %s: Safety timer D-Bus cleanup failed",
+                    name,
+                    device_address,
+                    exc_info=True,
+                )
 
         timer = threading.Timer(THREAD_SAFETY_TIMEOUT, _safety_timer_callback)
         timer.daemon = True

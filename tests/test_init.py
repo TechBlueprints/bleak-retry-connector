@@ -636,7 +636,7 @@ async def test_establish_connection_safety_timer_false_no_thread():
 
 @pytest.mark.asyncio
 async def test_establish_connection_safety_timer_fires_on_stuck():
-    """Safety timer fires cleanup when connect is stuck."""
+    """Safety timer fires D-Bus cleanup when connect is stuck."""
 
     class FakeBleakClient(BleakClient):
         def __init__(self, *args, **kwargs):
@@ -668,11 +668,6 @@ async def test_establish_connection_safety_timer_fires_on_stuck():
     with (
         patch("bleak_retry_connector.IS_LINUX", True),
         patch("bleak_retry_connector.threading.Timer", FakeTimer),
-        patch(
-            "bleak_retry_connector._find_bluetoothctl",
-            return_value="/usr/bin/bluetoothctl",
-        ),
-        patch("bleak_retry_connector.subprocess.run") as mock_subprocess,
         patch("bleak_retry_connector.calculate_backoff_time", return_value=0),
     ):
         try:
@@ -689,22 +684,24 @@ async def test_establish_connection_safety_timer_fires_on_stuck():
         except BleakError:
             pass
 
-        # Simulate the timer firing (inside the patch context)
+        # Simulate the timer firing.  The callback calls
+        # asyncio.run(_clear_device_via_dbus(address)) which spins up
+        # a new event loop in the thread.  We mock asyncio.run so
+        # no real D-Bus connection is attempted, then inspect the
+        # coroutine it was given.
         assert timer_callback is not None
-        timer_callback()
+        with patch("bleak_retry_connector.asyncio.run") as mock_run:
+            timer_callback()
 
-        mock_subprocess.assert_called_once()
-        call_args = mock_subprocess.call_args
-        assert call_args[0][0] == [
-            "/usr/bin/bluetoothctl",
-            "remove",
-            "aa:bb:cc:dd:ee:ff",
-        ]
+        mock_run.assert_called_once()
+        coro = mock_run.call_args[0][0]
+        # Close the unawaited coroutine to avoid warnings
+        coro.close()
 
 
 @pytest.mark.asyncio
-async def test_establish_connection_safety_timer_fallback_no_bluetoothctl():
-    """Without bluetoothctl, safety timer falls back to clear_cache."""
+async def test_establish_connection_safety_timer_dbus_failure_handled():
+    """Safety timer handles D-Bus cleanup failure gracefully."""
 
     class FakeBleakClient(BleakClient):
         def __init__(self, *args, **kwargs):
@@ -735,8 +732,6 @@ async def test_establish_connection_safety_timer_fallback_no_bluetoothctl():
     with (
         patch("bleak_retry_connector.IS_LINUX", True),
         patch("bleak_retry_connector.threading.Timer", FakeTimer),
-        patch("bleak_retry_connector._find_bluetoothctl", return_value=None),
-        patch("bleak_retry_connector.asyncio.run_coroutine_threadsafe") as mock_rcts,
         patch("bleak_retry_connector.calculate_backoff_time", return_value=0),
     ):
         try:
@@ -753,11 +748,13 @@ async def test_establish_connection_safety_timer_fallback_no_bluetoothctl():
         except BleakError:
             pass
 
-        # Simulate the timer firing (inside the patch context)
+        # Simulate the timer firing with D-Bus failure -- should not raise
         assert timer_callback is not None
-        timer_callback()
-
-        mock_rcts.assert_called_once()
+        with patch(
+            "bleak_retry_connector.asyncio.run",
+            side_effect=OSError("D-Bus unavailable"),
+        ):
+            timer_callback()  # Should not raise
 
 
 @pytest.mark.asyncio
