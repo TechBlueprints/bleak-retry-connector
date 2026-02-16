@@ -24,8 +24,10 @@ from .bluez import (  # noqa: F401
     BleakSlotManager,
     _get_properties,
     _get_services_cache,
+    address_to_bluez_path,
     clear_cache,
     device_source,
+    discover_adapters,
     get_connected_devices,
     get_device,
     get_device_by_adapter,
@@ -86,6 +88,7 @@ __all__ = [
     "BleakSlotManager",  # Currently only possible for BlueZ, for MacOS we have no of knowing
     "ConnectionWatchdog",
     "ble_device_description",
+    "discover_adapters",
     "establish_connection",
     "close_stale_connections",
     "close_stale_connections_by_address",
@@ -446,6 +449,34 @@ def _find_bluetoothctl() -> str | None:
     return shutil.which("bluetoothctl")
 
 
+def _pick_adapter(
+    adapters: list[str],
+    attempt: int,
+) -> str:
+    """Round-robin through configured adapters.
+
+    On attempt 0, use adapters[0].
+    On attempt 1, use adapters[1].
+    On attempt N, use adapters[N % len(adapters)].
+    """
+    return adapters[attempt % len(adapters)]
+
+
+def _make_device_for_adapter(device: BLEDevice, adapter: str) -> BLEDevice:
+    """Create a BLEDevice with a D-Bus path targeting a specific adapter.
+
+    When rotating adapters, the BLEDevice's internal D-Bus path must
+    reference the target adapter so BleakClient uses the correct one.
+    """
+    address = device.address
+    path = address_to_bluez_path(address, adapter)
+    return BLEDevice(
+        address,
+        device.name or address,
+        {"path": path},
+    )
+
+
 async def establish_connection(
     client_class: type[AnyBleakClient],
     device: BLEDevice,
@@ -458,6 +489,7 @@ async def establish_connection(
     pair: bool = False,
     safety_timer: bool = False,
     close_inactive_connections: bool = False,
+    adapters: list[str] | None = None,
     **kwargs: Any,
 ) -> AnyBleakClient:
     """Establish a connection to the device.
@@ -472,6 +504,11 @@ async def establish_connection(
 
     The timer is opt-in because it spawns a thread and may call
     ``subprocess.run``; existing callers are unaffected.
+
+    When ``adapters`` is provided, each retry attempt round-robins through
+    the list so that a failure on one adapter is followed by an attempt on
+    the next.  This is useful on systems with multiple BLE radios (e.g.,
+    hci0, hci1) where one adapter may be degraded while another works.
     """
     timeouts = 0
     connect_errors = 0
@@ -508,29 +545,30 @@ async def establish_connection(
     debug_enabled = _LOGGER.isEnabledFor(logging.DEBUG)
     rssi: int | None = None
     inprogress_cleared = False
-    if IS_LINUX and (devices := await get_connected_devices(device)):
-        # Bleak 0.17 will handle already connected devices for us so
-        # if we are already connected we swap the device to the connected
-        # device — but only if it's not a phantom.
-        adopted = devices[0]
-        if close_inactive_connections and await is_inactive_connection(adopted):
-            _LOGGER.warning(
-                "%s - %s: Inactive connection detected "
-                "(Connected but ServicesResolved is not True) — clearing",
-                name,
-                adopted.address,
-            )
-            await clear_cache(adopted.address)
-        else:
-            device = adopted
+    use_adapter_rotation = bool(adapters)
 
-    client = client_class(
-        device,
-        disconnected_callback=disconnected_callback,
-        pair=pair,
-        _is_retry_client=True,
-        **kwargs,
-    )
+    if not use_adapter_rotation:
+        # Original behavior: check for already-connected devices and
+        # create the client once before the retry loop.
+        if IS_LINUX and (devices := await get_connected_devices(device)):
+            adopted = devices[0]
+            if close_inactive_connections and await is_inactive_connection(adopted):
+                _LOGGER.warning(
+                    "%s - %s: Inactive connection detected "
+                    "(Connected but ServicesResolved is not True) — clearing",
+                    name,
+                    adopted.address,
+                )
+                await clear_cache(adopted.address)
+            else:
+                device = adopted
+        client = client_class(
+            device,
+            disconnected_callback=disconnected_callback,
+            pair=pair,
+            _is_retry_client=True,
+            **kwargs,
+        )
 
     # Thread-level safety timer: runs independently of the asyncio event
     # loop so it can fire even when a synchronous D-Bus call blocks the
@@ -585,7 +623,27 @@ async def establish_connection(
     try:
         while True:
             attempt += 1
-            if debug_enabled:
+
+            if use_adapter_rotation and adapters:
+                current_adapter = _pick_adapter(adapters, attempt - 1)
+                attempt_device = _make_device_for_adapter(device, current_adapter)
+                client = client_class(
+                    attempt_device,
+                    disconnected_callback=disconnected_callback,
+                    pair=pair,
+                    _is_retry_client=True,
+                    adapter=current_adapter,
+                    **kwargs,
+                )
+                if debug_enabled:
+                    _LOGGER.debug(
+                        "%s - %s: Connection attempt: %s (adapter: %s)",
+                        name,
+                        device.address,
+                        attempt,
+                        current_adapter,
+                    )
+            elif debug_enabled:
                 _LOGGER.debug(
                     "%s - %s: Connection attempt: %s",
                     name,
@@ -598,7 +656,9 @@ async def establish_connection(
                     # Only use cache if we have valid services in the cache
                     should_use_cache = use_services_cache or bool(cached_services)
                     if should_use_cache:
-                        should_use_cache = await _has_valid_services_in_cache(device)
+                        should_use_cache = await _has_valid_services_in_cache(
+                            attempt_device if use_adapter_rotation else device
+                        )
 
                     await client.connect(
                         timeout=BLEAK_TIMEOUT,
