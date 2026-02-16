@@ -2539,28 +2539,52 @@ def test_make_device_for_adapter():
     assert new_dev.details["path"] == "/org/bluez/hci1/dev_AA_BB_CC_DD_EE_FF"
 
 
-def test_discover_adapters_with_sys_path(tmp_path):
-    """discover_adapters reads /sys/class/bluetooth/ for hci* entries."""
+@pytest.mark.asyncio
+async def test_discover_adapters_returns_adapters():
+    """discover_adapters delegates to bluetooth-adapters and returns sorted list."""
+    import sys
+    from types import ModuleType
+
     from bleak_retry_connector.bluez import discover_adapters
 
-    bt_path = tmp_path / "bluetooth"
-    bt_path.mkdir()
-    (bt_path / "hci0").mkdir()
-    (bt_path / "hci1").mkdir()
-    (bt_path / "rfkill0").mkdir()
+    mock_adapter_obj = MagicMock()
+    mock_adapter_obj.refresh = AsyncMock()
+    mock_adapter_obj.adapters = {"hci1": {}, "hci0": {}}
 
-    with patch("bleak_retry_connector.bluez.pathlib.Path", return_value=bt_path):
-        result = discover_adapters()
+    fake_module = ModuleType("bluetooth_adapters")
+    fake_module.get_adapters = MagicMock(return_value=mock_adapter_obj)
+
+    with (
+        patch("bleak_retry_connector.bluez.IS_LINUX", True),
+        patch.dict(sys.modules, {"bluetooth_adapters": fake_module}),
+    ):
+        result = await discover_adapters()
 
     assert result == ["hci0", "hci1"]
 
 
-def test_discover_adapters_no_sys_path():
-    """discover_adapters returns ['hci0'] when /sys/class/bluetooth is absent."""
+@pytest.mark.asyncio
+async def test_discover_adapters_fallback_on_failure():
+    """discover_adapters returns ['hci0'] when bluetooth-adapters import fails."""
+    import sys
+
     from bleak_retry_connector.bluez import discover_adapters
 
-    with patch("bleak_retry_connector.bluez.pathlib.Path") as mock_path:
-        mock_path.return_value.exists.return_value = False
-        result = discover_adapters()
+    with (
+        patch("bleak_retry_connector.bluez.IS_LINUX", True),
+        patch.dict(sys.modules, {"bluetooth_adapters": None}),
+    ):
+        result = await discover_adapters()
+
+    assert result == ["hci0"]
+
+
+@pytest.mark.asyncio
+async def test_discover_adapters_non_linux():
+    """discover_adapters returns ['hci0'] on non-Linux platforms."""
+    from bleak_retry_connector.bluez import discover_adapters
+
+    with patch("bleak_retry_connector.bluez.IS_LINUX", False):
+        result = await discover_adapters()
 
     assert result == ["hci0"]

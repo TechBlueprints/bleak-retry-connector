@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-import pathlib
 import time
 from collections.abc import Callable, Generator
 from dataclasses import dataclass
@@ -582,17 +581,27 @@ def ble_device_from_properties(path: str, props: dict[str, Any]) -> BLEDevice:
     )
 
 
-def discover_adapters() -> list[str]:
+async def discover_adapters() -> list[str]:
     """Discover available BLE adapters on the system.
 
-    Reads /sys/class/bluetooth/ for hci* entries.
+    Delegates to ``bluetooth-adapters`` (already a dependency of this
+    project) which enumerates adapters via D-Bus and HCI, providing
+    richer information than reading ``/sys/class/bluetooth/`` directly.
 
-    Returns a sorted list of adapter names (e.g., ["hci0", "hci1"]).
-    Returns ["hci0"] as a safe default if no adapters can be discovered.
+    Returns a sorted list of adapter names (e.g., ``["hci0", "hci1"]``).
+    Returns ``["hci0"]`` as a safe default if no adapters can be
+    discovered or on non-Linux platforms.
     """
-    bt_path = pathlib.Path("/sys/class/bluetooth")
-    if bt_path.exists():
-        adapters = sorted(d.name for d in bt_path.iterdir() if d.name.startswith("hci"))
+    if not IS_LINUX:
+        return ["hci0"]
+    try:
+        from bluetooth_adapters import get_adapters
+
+        adapter_obj = get_adapters()
+        await adapter_obj.refresh()
+        adapters = sorted(adapter_obj.adapters.keys())
         if adapters:
             return adapters
+    except Exception:
+        _LOGGER.debug("Failed to enumerate adapters via bluetooth-adapters", exc_info=True)
     return ["hci0"]
