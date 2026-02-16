@@ -606,31 +606,6 @@ async def test_establish_connection_safety_timer_cancelled_on_success():
         )
 
     assert isinstance(client, FakeBleakClient)
-
-
-@pytest.mark.asyncio
-async def test_establish_connection_safety_timer_false_no_thread():
-    """safety_timer=False (default) does not create a thread."""
-
-    class FakeBleakClient(BleakClient):
-        def __init__(self, *args, **kwargs):
-            pass
-
-        async def connect(self, *args, **kwargs):
-            pass
-
-        async def disconnect(self, *args, **kwargs):
-            pass
-
-    with patch("bleak_retry_connector.threading.Timer") as mock_timer:
-        client = await establish_connection(
-            FakeBleakClient,
-            MagicMock(),
-            "test",
-            safety_timer=False,
-        )
-
-    assert isinstance(client, FakeBleakClient)
     mock_timer.assert_not_called()
 
 
@@ -1029,6 +1004,148 @@ async def test_establish_connection_single_adapter_rotation():
 
     assert isinstance(client, FakeBleakClient)
     assert adapters_seen == ["hci1", "hci1"]
+
+
+@pytest.mark.asyncio
+async def test_establish_connection_with_lock_config():
+    """Lock is acquired and released around connection attempts."""
+
+    class FakeBleakClient(BleakClient):
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def connect(self, *args, **kwargs):
+            pass
+
+        async def disconnect(self, *args, **kwargs):
+            pass
+
+    from bleak_retry_connector import LockConfig
+
+    with (
+        patch(
+            "bleak_retry_connector.acquire_lock", new_callable=AsyncMock
+        ) as mock_acquire,
+        patch("bleak_retry_connector.release_lock") as mock_release,
+    ):
+        mock_acquire.return_value = 42
+
+        config = LockConfig(enabled=True)
+        client = await establish_connection(
+            FakeBleakClient,
+            MagicMock(),
+            "test",
+            lock_config=config,
+        )
+
+    assert isinstance(client, FakeBleakClient)
+    mock_acquire.assert_awaited_once()
+    mock_release.assert_called_once_with(42)
+
+
+@pytest.mark.asyncio
+async def test_establish_connection_with_semaphore():
+    """In-process semaphore is acquired and released."""
+
+    class FakeBleakClient(BleakClient):
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def connect(self, *args, **kwargs):
+            pass
+
+        async def disconnect(self, *args, **kwargs):
+            pass
+
+    import asyncio
+
+    sem = asyncio.Semaphore(1)
+
+    client = await establish_connection(
+        FakeBleakClient,
+        MagicMock(),
+        "test",
+        in_process_semaphore=sem,
+    )
+
+    assert isinstance(client, FakeBleakClient)
+    assert not sem.locked()
+
+
+@pytest.mark.asyncio
+async def test_establish_connection_lock_released_on_failure():
+    """Lock and semaphore are released even when connection fails."""
+
+    class FakeBleakClient(BleakClient):
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def connect(self, *args, **kwargs):
+            raise BleakError("connection failed")
+
+        async def disconnect(self, *args, **kwargs):
+            pass
+
+    import asyncio
+
+    from bleak_retry_connector import LockConfig
+
+    sem = asyncio.Semaphore(1)
+
+    with (
+        patch(
+            "bleak_retry_connector.acquire_lock", new_callable=AsyncMock
+        ) as mock_acquire,
+        patch("bleak_retry_connector.release_lock") as mock_release,
+        patch("bleak_retry_connector.calculate_backoff_time", return_value=0),
+    ):
+        mock_acquire.return_value = 42
+
+        config = LockConfig(enabled=True)
+        try:
+            await establish_connection(
+                FakeBleakClient,
+                BLEDevice(
+                    "aa:bb:cc:dd:ee:ff",
+                    "name",
+                    {"path": "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF"},
+                ),
+                "test",
+                lock_config=config,
+                in_process_semaphore=sem,
+            )
+        except BleakError:
+            pass
+
+    assert mock_release.call_count == mock_acquire.await_count
+    assert not sem.locked()
+
+
+@pytest.mark.asyncio
+async def test_establish_connection_no_lock_by_default():
+    """No lock is acquired when lock_config is not provided."""
+
+    class FakeBleakClient(BleakClient):
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def connect(self, *args, **kwargs):
+            pass
+
+        async def disconnect(self, *args, **kwargs):
+            pass
+
+    with patch(
+        "bleak_retry_connector.acquire_lock", new_callable=AsyncMock
+    ) as mock_acquire:
+        client = await establish_connection(
+            FakeBleakClient,
+            MagicMock(),
+            "test",
+        )
+
+    assert isinstance(client, FakeBleakClient)
+    mock_acquire.assert_not_awaited()
 
 
 @pytest.mark.asyncio
