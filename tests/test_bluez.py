@@ -17,6 +17,7 @@ from bleak_retry_connector import (
 from bleak_retry_connector.bluez import (
     adapter_path_from_device_path,
     ble_device_from_properties,
+    is_inactive_connection,
     path_from_ble_device,
     stop_discovery,
     wait_for_device_to_reappear,
@@ -737,3 +738,173 @@ async def test_stop_discovery_no_manager(
 
     await stop_discovery("hci0")
     assert "Failed to stop discovery" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# is_inactive_connection
+# ---------------------------------------------------------------------------
+
+
+async def test_is_inactive_connection_services_not_resolved():
+    """Connected=True, ServicesResolved=False → inactive."""
+
+    class FakeBluezManager:
+        def __init__(self):
+            self._properties = {
+                "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF": {
+                    defs.DEVICE_INTERFACE: {
+                        "Connected": True,
+                        "ServicesResolved": False,
+                        "Address": "AA:BB:CC:DD:EE:FF",
+                        "Alias": "Test Device",
+                    },
+                },
+            }
+
+    manager = FakeBluezManager()
+    mock_get_manager = AsyncMock(return_value=manager)
+    bleak_retry_connector.bluez.defs = defs
+
+    device = BLEDevice(
+        "AA:BB:CC:DD:EE:FF",
+        "Test Device",
+        {"path": "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF"},
+    )
+    with (
+        patch("bleak_retry_connector.bluez.IS_LINUX", True),
+        patch(
+            "bleak_retry_connector.bluez.get_global_bluez_manager_with_timeout",
+            mock_get_manager,
+        ),
+    ):
+        result = await is_inactive_connection(device)
+    assert result is True
+
+
+async def test_is_inactive_connection_services_resolved():
+    """Connected=True, ServicesResolved=True → active, not inactive."""
+
+    class FakeBluezManager:
+        def __init__(self):
+            self._properties = {
+                "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF": {
+                    defs.DEVICE_INTERFACE: {
+                        "Connected": True,
+                        "ServicesResolved": True,
+                        "Address": "AA:BB:CC:DD:EE:FF",
+                        "Alias": "Test Device",
+                    },
+                },
+            }
+
+    manager = FakeBluezManager()
+    mock_get_manager = AsyncMock(return_value=manager)
+    bleak_retry_connector.bluez.defs = defs
+
+    device = BLEDevice(
+        "AA:BB:CC:DD:EE:FF",
+        "Test Device",
+        {"path": "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF"},
+    )
+    with (
+        patch("bleak_retry_connector.bluez.IS_LINUX", True),
+        patch(
+            "bleak_retry_connector.bluez.get_global_bluez_manager_with_timeout",
+            mock_get_manager,
+        ),
+    ):
+        result = await is_inactive_connection(device)
+    assert result is False
+
+
+async def test_is_inactive_connection_not_connected():
+    """Connected=False → not inactive."""
+
+    class FakeBluezManager:
+        def __init__(self):
+            self._properties = {
+                "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF": {
+                    defs.DEVICE_INTERFACE: {
+                        "Connected": False,
+                        "Address": "AA:BB:CC:DD:EE:FF",
+                        "Alias": "Test Device",
+                    },
+                },
+            }
+
+    manager = FakeBluezManager()
+    mock_get_manager = AsyncMock(return_value=manager)
+    bleak_retry_connector.bluez.defs = defs
+
+    device = BLEDevice(
+        "AA:BB:CC:DD:EE:FF",
+        "Test Device",
+        {"path": "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF"},
+    )
+    with (
+        patch("bleak_retry_connector.bluez.IS_LINUX", True),
+        patch(
+            "bleak_retry_connector.bluez.get_global_bluez_manager_with_timeout",
+            mock_get_manager,
+        ),
+    ):
+        result = await is_inactive_connection(device)
+    assert result is False
+
+
+async def test_is_inactive_connection_no_path():
+    """No path in device details → not inactive."""
+    device = BLEDevice(
+        "AA:BB:CC:DD:EE:FF",
+        "Test Device",
+        {},
+    )
+    result = await is_inactive_connection(device)
+    assert result is False
+
+
+async def test_is_inactive_connection_not_linux():
+    """Non-Linux platform → not inactive."""
+    with patch("bleak_retry_connector.bluez.IS_LINUX", False):
+        device = BLEDevice(
+            "AA:BB:CC:DD:EE:FF",
+            "Test Device",
+            {"path": "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF"},
+        )
+        result = await is_inactive_connection(device)
+        assert result is False
+
+
+async def test_is_inactive_connection_services_resolved_absent():
+    """Connected=True, ServicesResolved absent → inactive (not True)."""
+
+    class FakeBluezManager:
+        def __init__(self):
+            self._properties = {
+                "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF": {
+                    defs.DEVICE_INTERFACE: {
+                        "Connected": True,
+                        "Address": "AA:BB:CC:DD:EE:FF",
+                        "Alias": "Test Device",
+                    },
+                },
+            }
+
+    manager = FakeBluezManager()
+    mock_get_manager = AsyncMock(return_value=manager)
+    bleak_retry_connector.bluez.defs = defs
+
+    device = BLEDevice(
+        "AA:BB:CC:DD:EE:FF",
+        "Test Device",
+        {"path": "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF"},
+    )
+    with (
+        patch("bleak_retry_connector.bluez.IS_LINUX", True),
+        patch(
+            "bleak_retry_connector.bluez.get_global_bluez_manager_with_timeout",
+            mock_get_manager,
+        ),
+    ):
+        result = await is_inactive_connection(device)
+    assert result is True

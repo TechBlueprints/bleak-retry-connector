@@ -550,6 +550,63 @@ async def get_connected_devices(device: BLEDevice) -> list[BLEDevice]:
     return connected
 
 
+async def is_inactive_connection(device: BLEDevice) -> bool:
+    """Check whether a device has an inactive BLE connection.
+
+    An inactive connection is one where BlueZ D-Bus reports
+    ``Connected=True`` but ``ServicesResolved`` is not ``True``.
+    This indicates GATT discovery never completed — typically because
+    the HCI transport died after the initial connection event.
+
+    This function is intended to be called when the caller has reason
+    to believe the connection may be dead (e.g. no data received for
+    a period of time).  The caller's context eliminates ambiguity:
+    if the caller didn't initiate this connection, ``ServicesResolved``
+    not being ``True`` is definitive.
+
+    For deeper diagnosis (cross-referencing with HCI handles), use
+    :func:`~bleak_retry_connector.diagnostics.diagnose_stuck_state`.
+
+    Parameters
+    ----------
+    device:
+        The BLE device to check.
+
+    Returns ``True`` if the connection is inactive.
+    """
+    if not IS_LINUX or not isinstance(device.details, dict):
+        return False
+
+    path = device.details.get("path")
+    if not path:
+        return False
+
+    inactive = await _is_connection_inactive(path, device.address)
+    if inactive:
+        _LOGGER.debug(
+            "%s: Inactive connection detected "
+            "— Connected but ServicesResolved is not True",
+            device.address,
+        )
+    return inactive
+
+
+async def _is_connection_inactive(path: str, address: str) -> bool:
+    """Return True if the device at *path* is Connected but ServicesResolved is not True."""
+    properties = await _get_properties()
+    if not properties or path not in properties:
+        return False
+
+    device_props = properties[path].get(defs.DEVICE_INTERFACE)
+    if not device_props:
+        return False
+
+    if not device_props.get("Connected"):
+        return False
+
+    return device_props.get("ServicesResolved") is not True
+
+
 async def get_device(address: str) -> BLEDevice | None:
     """Get the device."""
     if not IS_LINUX:

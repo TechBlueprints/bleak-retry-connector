@@ -4,6 +4,7 @@ __version__ = "4.5.0"
 
 
 import asyncio
+import contextlib
 import logging
 import shutil
 import subprocess  # nosec
@@ -28,11 +29,17 @@ from .bluez import (  # noqa: F401
     get_connected_devices,
     get_device,
     get_device_by_adapter,
+    is_inactive_connection,
     path_from_ble_device,
     wait_for_device_to_reappear,
     wait_for_disconnect,
 )
 from .const import IS_LINUX, NO_RSSI_VALUE, RSSI_SWITCH_THRESHOLD, THREAD_SAFETY_TIMEOUT
+from .diagnostics import (  # noqa: F401
+    StuckState,
+    clear_stuck_state,
+    diagnose_stuck_state,
+)
 from .recovery import (  # noqa: F401
     PROFILE_BATTERY,
     PROFILE_ON_DEMAND,
@@ -104,6 +111,10 @@ __all__ = [
     "PROFILE_SENSOR",
     "PROFILE_ON_DEMAND",
     "reset_adapter",
+    "StuckState",
+    "diagnose_stuck_state",
+    "clear_stuck_state",
+    "is_inactive_connection",
 ]
 
 
@@ -437,6 +448,7 @@ async def establish_connection(
     use_services_cache: bool = True,
     pair: bool = False,
     safety_timer: bool = False,
+    close_inactive_connections: bool = False,
     **kwargs: Any,
 ) -> AnyBleakClient:
     """Establish a connection to the device.
@@ -489,8 +501,18 @@ async def establish_connection(
     if IS_LINUX and (devices := await get_connected_devices(device)):
         # Bleak 0.17 will handle already connected devices for us so
         # if we are already connected we swap the device to the connected
-        # device.
-        device = devices[0]
+        # device — but only if it's not a phantom.
+        adopted = devices[0]
+        if close_inactive_connections and await is_inactive_connection(adopted):
+            _LOGGER.warning(
+                "%s - %s: Inactive connection detected "
+                "(Connected but ServicesResolved is not True) — clearing",
+                name,
+                adopted.address,
+            )
+            await clear_cache(adopted.address)
+        else:
+            device = adopted
 
     client = client_class(
         device,
@@ -675,7 +697,33 @@ async def establish_connection(
                 await wait_for_disconnect(device, backoff_time)
                 _raise_if_needed(name, device.address, exc)
             else:
-                return client
+                if close_inactive_connections:
+                    gatt_services = None
+                    with contextlib.suppress(Exception):
+                        gatt_services = client.services
+                    if IS_LINUX and gatt_services is not None and len(gatt_services) == 0:
+                        connect_errors += 1
+                        _LOGGER.warning(
+                            "%s - %s: Connected but GATT services empty "
+                            "— disconnecting (attempt: %s)",
+                            name,
+                            device.address,
+                            attempt,
+                        )
+                        with contextlib.suppress(Exception):
+                            await client.disconnect()
+                        await clear_cache(device.address)
+                        backoff_time = BLEAK_BACKOFF_TIME
+                        await wait_for_disconnect(device, backoff_time)
+                        _raise_if_needed(
+                            name,
+                            device.address,
+                            BleakError("GATT services empty after connect"),
+                        )
+                    else:
+                        return client
+                else:
+                    return client
             # Ensure the disconnect callback
             # has a chance to run before we try to reconnect
             await asyncio.sleep(0)
