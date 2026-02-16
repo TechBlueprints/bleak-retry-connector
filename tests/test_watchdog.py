@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -155,3 +155,106 @@ def test_watchdog_is_importable_from_top_level():
     from bleak_retry_connector import ConnectionWatchdog as CW
 
     assert CW is ConnectionWatchdog
+
+
+@pytest.mark.asyncio
+async def test_watchdog_cleanup_disconnects_and_clears_cache():
+    """When client/device are provided, timeout disconnects and clears cache."""
+    on_timeout = AsyncMock()
+    mock_client = MagicMock()
+    mock_client.disconnect = AsyncMock()
+    mock_device = MagicMock()
+    mock_device.address = "AA:BB:CC:DD:EE:FF"
+
+    with patch(
+        "bleak_retry_connector.watchdog.clear_cache", new_callable=AsyncMock
+    ) as mock_clear:
+        wd = ConnectionWatchdog(
+            timeout=0.2,
+            on_timeout=on_timeout,
+            client=mock_client,
+            device=mock_device,
+        )
+        wd.start()
+        await asyncio.sleep(0.5)
+
+    mock_client.disconnect.assert_awaited_once()
+    mock_clear.assert_awaited_once_with("AA:BB:CC:DD:EE:FF")
+    on_timeout.assert_awaited_once()
+    assert not wd.is_running
+
+
+@pytest.mark.asyncio
+async def test_watchdog_cleanup_disconnect_timeout():
+    """If disconnect hangs past 5s, watchdog proceeds to clear_cache."""
+    on_timeout = AsyncMock()
+    mock_client = MagicMock()
+
+    async def slow_disconnect():
+        await asyncio.sleep(60)
+
+    mock_client.disconnect = slow_disconnect
+    mock_device = MagicMock()
+    mock_device.address = "AA:BB:CC:DD:EE:FF"
+
+    with (
+        patch(
+            "bleak_retry_connector.watchdog.clear_cache", new_callable=AsyncMock
+        ) as mock_clear,
+        patch("bleak_retry_connector.watchdog.DISCONNECT_TIMEOUT", 0.1),
+    ):
+        wd = ConnectionWatchdog(
+            timeout=0.2,
+            on_timeout=on_timeout,
+            client=mock_client,
+            device=mock_device,
+        )
+        wd.start()
+        await asyncio.sleep(1.0)
+
+    mock_clear.assert_awaited_once_with("AA:BB:CC:DD:EE:FF")
+    on_timeout.assert_awaited_once()
+    assert not wd.is_running
+
+
+@pytest.mark.asyncio
+async def test_watchdog_cleanup_disconnect_exception():
+    """If disconnect raises, watchdog proceeds to clear_cache and callback."""
+    on_timeout = AsyncMock()
+    mock_client = MagicMock()
+    mock_client.disconnect = AsyncMock(side_effect=RuntimeError("dead"))
+    mock_device = MagicMock()
+    mock_device.address = "AA:BB:CC:DD:EE:FF"
+
+    with patch(
+        "bleak_retry_connector.watchdog.clear_cache", new_callable=AsyncMock
+    ) as mock_clear:
+        wd = ConnectionWatchdog(
+            timeout=0.2,
+            on_timeout=on_timeout,
+            client=mock_client,
+            device=mock_device,
+        )
+        wd.start()
+        await asyncio.sleep(0.5)
+
+    mock_clear.assert_awaited_once_with("AA:BB:CC:DD:EE:FF")
+    on_timeout.assert_awaited_once()
+    assert not wd.is_running
+
+
+@pytest.mark.asyncio
+async def test_watchdog_no_client_no_cleanup():
+    """Without client/device, no cleanup happens (backward compat)."""
+    on_timeout = AsyncMock()
+
+    with patch(
+        "bleak_retry_connector.watchdog.clear_cache", new_callable=AsyncMock
+    ) as mock_clear:
+        wd = ConnectionWatchdog(timeout=0.2, on_timeout=on_timeout)
+        wd.start()
+        await asyncio.sleep(0.5)
+
+    mock_clear.assert_not_awaited()
+    on_timeout.assert_awaited_once()
+    assert not wd.is_running
