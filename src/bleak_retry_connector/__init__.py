@@ -34,6 +34,7 @@ from .bluez import (  # noqa: F401
 )
 from .const import IS_LINUX, NO_RSSI_VALUE, RSSI_SWITCH_THRESHOLD, THREAD_SAFETY_TIMEOUT
 from .util import asyncio_timeout
+from .watchdog import ConnectionWatchdog  # noqa: F401
 
 DISCONNECT_TIMEOUT = 5
 
@@ -65,6 +66,7 @@ BLEAK_DISCONNECTED_BACKOFF_TIME = 0.0
 
 __all__ = [
     "BleakSlotManager",  # Currently only possible for BlueZ, for MacOS we have no of knowing
+    "ConnectionWatchdog",
     "ble_device_description",
     "establish_connection",
     "close_stale_connections",
