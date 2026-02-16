@@ -490,6 +490,7 @@ async def establish_connection(
     safety_timer: bool = False,
     close_inactive_connections: bool = False,
     adapters: list[str] | None = None,
+    validate_connection: Callable[[AnyBleakClient], Awaitable[bool]] | None = None,
     **kwargs: Any,
 ) -> AnyBleakClient:
     """Establish a connection to the device.
@@ -509,6 +510,13 @@ async def establish_connection(
     the list so that a failure on one adapter is followed by an attempt on
     the next.  This is useful on systems with multiple BLE radios (e.g.,
     hci0, hci1) where one adapter may be degraded while another works.
+
+    If ``validate_connection`` is provided it is called after every
+    successful ``connect()`` with the connected client.  The callback
+    should return ``True`` when the connection is usable.  Returning
+    ``False`` or raising any exception is treated as a validation
+    failure --- the client is disconnected and the attempt is retried
+    until ``max_attempts`` is exhausted.
     """
     timeouts = 0
     connect_errors = 0
@@ -790,7 +798,64 @@ async def establish_connection(
                 await wait_for_disconnect(device, backoff_time)
                 _raise_if_needed(name, device.address, exc)
             else:
-                if close_inactive_connections:
+                if validate_connection is not None:
+                    try:
+                        valid = await validate_connection(client)
+                    except Exception:
+                        _LOGGER.debug(
+                            "%s - %s: Connection validation raised an "
+                            "exception, treating as failure (attempt: %s)",
+                            name,
+                            device.address,
+                            attempt,
+                        )
+                        valid = False
+                    if not valid:
+                        connect_errors += 1
+                        _LOGGER.debug(
+                            "%s - %s: Connection validation failed (attempt: %s)",
+                            name,
+                            device.address,
+                            attempt,
+                        )
+                        await client.disconnect()
+                        await wait_for_disconnect(device, BLEAK_BACKOFF_TIME)
+                        _raise_if_needed(
+                            name,
+                            device.address,
+                            BleakError(
+                                f"{name} - {device.address}: "
+                                "Connection validation failed"
+                            ),
+                        )
+                    elif close_inactive_connections:
+                        gatt_services = None
+                        with contextlib.suppress(Exception):
+                            gatt_services = client.services
+                        if IS_LINUX and gatt_services is not None and len(gatt_services) == 0:
+                            connect_errors += 1
+                            _LOGGER.warning(
+                                "%s - %s: Connected but GATT services empty "
+                                "— disconnecting (attempt: %s)",
+                                name,
+                                device.address,
+                                attempt,
+                            )
+                            with contextlib.suppress(Exception):
+                                await client.disconnect()
+                            await clear_cache(device.address)
+                            backoff_time = BLEAK_BACKOFF_TIME
+                            await wait_for_disconnect(device, backoff_time)
+                            _raise_if_needed(
+                                name,
+                                device.address,
+                                BleakError("GATT services empty after connect"),
+                            )
+                        else:
+                            return client
+                    else:
+                        return client
+                elif close_inactive_connections:
                     gatt_services = None
                     with contextlib.suppress(Exception):
                         gatt_services = client.services
