@@ -346,8 +346,9 @@ def adapter_path_from_device_path(device_path: str) -> str:
     Returns:
         A D-Bus object path of the adapter.
     """
-    # /org/bluez/hci1/dev_FA_23_9D_AA_45_46
-    return device_path[:15]
+    # /org/bluez/hci1/dev_FA_23_9D_AA_45_46 -> /org/bluez/hci1; split on the
+    # device segment rather than a fixed offset so hci10 and up keep both digits
+    return device_path.partition("/dev_")[0]
 
 
 async def wait_for_device_to_reappear(device: BLEDevice, wait_timeout: float) -> bool:

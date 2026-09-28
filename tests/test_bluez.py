@@ -709,6 +709,11 @@ async def test_adapter_path_from_device_path(mock_linux):
         adapter_path_from_device_path("/org/bluez/hci1/dev_FA_23_9D_AA_45_46")
         == "/org/bluez/hci1"
     )
+    # a two-digit adapter must keep both digits
+    assert (
+        adapter_path_from_device_path("/org/bluez/hci12/dev_FA_23_9D_AA_45_46")
+        == "/org/bluez/hci12"
+    )
 
 
 async def test_stop_discovery(mock_linux):
@@ -1517,7 +1522,7 @@ async def test_get_connected_devices_no_properties(
     assert await get_connected_devices(device) == []
 
 
-def test_get_possible_paths_reaches_high_numbered_adapters() -> None:
+async def test_get_possible_paths_reaches_high_numbered_adapters() -> None:
     """Regression: the search was capped at hci0-hci8, so a device on hci9
     or higher was never found. See the fix in _get_possible_paths."""
     paths = list(_get_possible_paths("/org/bluez/hciX/dev_FA_23_9D_AA_45_46"))
@@ -1527,7 +1532,7 @@ def test_get_possible_paths_reaches_high_numbered_adapters() -> None:
     assert "/org/bluez/hci17/dev_FA_23_9D_AA_45_46" not in paths
 
 
-def test_get_possible_paths_honours_a_raised_max_adapter(
+async def test_get_possible_paths_honours_a_raised_max_adapter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """MAX_ADAPTER is read on every call, so a host with adapters numbered
@@ -1538,7 +1543,7 @@ def test_get_possible_paths_honours_a_raised_max_adapter(
     assert len(paths) == 41
 
 
-def test_get_possible_paths_handles_a_multi_digit_input_adapter() -> None:
+async def test_get_possible_paths_handles_a_multi_digit_input_adapter() -> None:
     """A device already resolved on a two-digit adapter must still enumerate
     the single-digit adapters; the old fixed-index splice mangled these."""
     paths = list(_get_possible_paths("/org/bluez/hci10/dev_FA_23_9D_AA_45_46"))
